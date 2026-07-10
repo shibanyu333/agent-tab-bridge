@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { width: 300px; margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", sans-serif; padding: 12px; }
+  h1 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .ok { background: #34a853; } .bad { background: #ea4335; }
+  .sess { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; margin-top: 6px;
+          background: rgba(128,128,128,.1); }
+  .cdot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .meta { opacity: .65; font-size: 12px; flex: none; }
+  button { border: none; background: rgba(128,128,128,.18); border-radius: 6px; padding: 3px 8px;
+           cursor: pointer; font-size: 12px; color: inherit; }
+  button:hover { background: rgba(234,67,53,.25); }
+  .empty { opacity: .55; padding: 14px 0; text-align: center; }
+  .hint { opacity: .5; font-size: 11px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1><span id="connDot" class="dot bad"></span>Agent Tab Bridge <span id="connText" style="font-weight:400;opacity:.6;font-size:12px">未连接</span></h1>
+  <div id="list"><div class="empty">没有活跃的 agent 会话</div></div>
+  <div class="hint">每个 agent 一个彩色标签组 · 互不干扰 · 后台运行</div>
+  <script src="popup.js"></script>
+</body>
+</html>

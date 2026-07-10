@@ -1,0 +1,17 @@
+{
+  "name": "agent-tab-bridge",
+  "version": "0.1.0",
+  "description": "让本地 AI agent 并行、后台、互不干扰地控制各自的 Chrome 标签组",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "bridge": "node bridge/server.js",
+    "mcp": "node mcp/index.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  }
+}
