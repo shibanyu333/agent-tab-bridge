@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Agent Tab Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "让本地 AI agent 并行、后台、互不干扰地控制各自的彩色标签组",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "tabGroups", "scripting", "debugger", "storage", "alarms"],
+  "permissions": ["tabs", "tabGroups", "scripting", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {

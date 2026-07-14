@@ -134,35 +134,43 @@ server.tool(
 
 server.tool(
   'browser_snapshot',
-  '获取页面可交互元素快照(uid 编号文本树)。操作元素前先调这个拿 uid;页面变化后需重拍。',
-  { tabId: z.number(), maxChars: z.number().optional().describe('默认 20000') },
-  run(async ({ tabId, maxChars }) => {
-    const r = await cmd('snapshot', { tabId, maxChars });
+  '获取页面可交互元素快照(uid 编号文本树)。操作元素前先调这个拿 uid;页面变化后需重拍。' +
+    '后台管理页(WordPress 等)侧边菜单很吃字符额度,容易把正文表单挤掉 —— 传 selector 只抓目标区域最省事。' +
+    '隐藏字段(nonce/CSRF)和被 CSS 藏起来的 file input 也会一并列出。',
+  {
+    tabId: z.number(),
+    maxChars: z.number().optional().describe('默认 30000'),
+    selector: z.string().optional().describe('只快照该 CSS 选择器内的区域,如 "#col-left"、"form#addtag"'),
+  },
+  run(async ({ tabId, maxChars, selector }) => {
+    const r = await cmd('snapshot', { tabId, maxChars, selector });
     return text(r.text + `\n\n(共 ${r.elements} 个交互元素${r.truncated ? ',已截断' : ''})`);
   })
 );
 
 server.tool(
   'browser_screenshot',
-  '截取标签页画面(后台标签也可截)。首次使用会在浏览器顶部出现"正在调试"提示条,属正常现象。',
-  { tabId: z.number(), fullPage: z.boolean().optional(), format: z.enum(['png', 'jpeg', 'webp']).optional() },
+  '截取标签页画面(后台标签也可截,不打扰用户)。fullPage 会滚动分片再拼接。',
+  { tabId: z.number(), fullPage: z.boolean().optional(), format: z.enum(['png', 'jpeg']).optional() },
   run(async ({ tabId, fullPage, format }) => {
     const r = await cmd('screenshot', { tabId, fullPage, format });
-    return { content: [{ type: 'image', data: r.base64, mimeType: r.mimeType }] };
+    const content = [{ type: 'image', data: r.base64, mimeType: r.mimeType }];
+    if (r.truncated) content.push({ type: 'text', text: r.truncated });
+    return { content };
   })
 );
 
 server.tool(
   'browser_click',
-  '点击 snapshot 里的元素。默认合成事件(零打扰);复杂前端不响应时传 realEvents:true 用真实鼠标事件。',
-  { tabId: z.number(), uid: z.string(), dblClick: z.boolean().optional(), realEvents: z.boolean().optional() },
+  '点击 snapshot 里的元素。',
+  { tabId: z.number(), uid: z.string(), dblClick: z.boolean().optional() },
   run(async (a) => text(await cmd('click', a)))
 );
 
 server.tool(
   'browser_fill',
   '向输入框/文本域/下拉框/富文本填入内容(兼容 React/Vue 受控组件);checkbox 传 "true"/"false"。',
-  { tabId: z.number(), uid: z.string(), text: z.string(), realEvents: z.boolean().optional() },
+  { tabId: z.number(), uid: z.string(), text: z.string() },
   run(async (a) => text(await cmd('fill', a)))
 );
 
@@ -189,9 +197,58 @@ server.tool(
 
 server.tool(
   'browser_press_key',
-  '按键,如 Enter、Escape、Tab、ArrowDown、Ctrl+a。要触发表单提交等浏览器默认行为需 realEvents:true。',
-  { tabId: z.number(), key: z.string(), uid: z.string().optional().describe('先聚焦到该元素'), realEvents: z.boolean().optional() },
+  '按键,如 Enter、Escape、Tab、ArrowDown、Ctrl+a。提交表单请用 browser_submit_form,合成 Enter 不触发原生提交。',
+  { tabId: z.number(), key: z.string(), uid: z.string().optional().describe('先聚焦到该元素') },
   run(async (a) => text(await cmd('press_key', a)))
+);
+
+server.tool(
+  'browser_submit_form',
+  '原生提交表单(requestSubmit),自动带上全部字段——包括 nonce/CSRF 这类隐藏字段,并触发 HTML 校验。' +
+    'uid 传表单里的提交按钮或任意字段均可。' +
+    '后台表单(WordPress/WooCommerce 等)一律走这个:别手搓 fetch POST,那样缺 nonce 会被服务端静默丢弃。',
+  { tabId: z.number(), uid: z.string().describe('表单里的提交按钮或任意字段的 uid') },
+  run(async (a) => text(await cmd('submit', a)))
+);
+
+const MIME = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.avif': 'image/avif', '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf', '.zip': 'application/zip', '.csv': 'text/csv', '.txt': 'text/plain',
+  '.json': 'application/json', '.xml': 'application/xml', '.mp4': 'video/mp4', '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg', '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+const MAX_UPLOAD = 30 * 1024 * 1024;
+
+server.tool(
+  'browser_upload_file',
+  '上传本地文件到页面的文件选择框 —— 直接把文件塞进去,不会弹出系统文件对话框。' +
+    'uid 传 snapshot 里的 input(file)(即使它被 CSS 藏起来也照样能用),或传拖拽上传区的 uid。总大小上限 30MB。',
+  {
+    tabId: z.number(),
+    paths: z.array(z.string()).min(1).describe('本地文件绝对路径(支持 ~ 开头)'),
+    uid: z.string().optional().describe('snapshot 里 input(file) 或拖拽区的 uid'),
+    selector: z.string().optional().describe('替代 uid:直接用 CSS 选择器定位,如 "input[type=file]"'),
+  },
+  run(async ({ tabId, paths, uid, selector }) => {
+    if (!uid && !selector) throw new Error('需要 uid 或 selector 之一来定位上传控件');
+    let total = 0;
+    const files = paths.map((p) => {
+      const abs = path.resolve(p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p);
+      if (!fs.existsSync(abs)) throw new Error(`文件不存在: ${abs}`);
+      const buf = fs.readFileSync(abs);
+      total += buf.length;
+      if (total > MAX_UPLOAD) throw new Error(`文件总大小超过 30MB 上限(已累计 ${(total / 1e6).toFixed(1)}MB)`);
+      return {
+        name: path.basename(abs),
+        type: MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream',
+        b64: buf.toString('base64'),
+      };
+    });
+    return text(await cmd('upload', { tabId, uid, selector, files }));
+  })
 );
 
 server.tool(
@@ -203,8 +260,12 @@ server.tool(
 
 server.tool(
   'browser_evaluate',
-  '在页面执行 JS 函数并返回 JSON 结果,如 () => document.title 或 async () => {...}。',
-  { tabId: z.number(), fn: z.string().describe('函数声明,如 () => document.title') },
+  '在页面执行 JS 函数并返回 JSON 结果,如 () => document.title 或 async () => {...}。' +
+    '在页面主世界运行,能访问 jQuery/React 等页面全局变量。极少数强 CSP 页面会禁止 eval,此时改用 snapshot/extract 等工具。',
+  {
+    tabId: z.number(),
+    fn: z.string().describe('函数声明,如 () => document.title'),
+  },
   run(async (a) => text(await cmd('evaluate', a)))
 );
 
@@ -217,7 +278,7 @@ server.tool(
 
 server.tool(
   'browser_console',
-  '读取标签页 console 消息(需要挂调试器,会出现提示条)。',
+  '读取标签页的 console 消息和未捕获错误。只覆盖本工具打开/导航过的标签,且从页面开始加载起就在记录。',
   { tabId: z.number(), limit: z.number().optional() },
   run(async (a) => text(await cmd('console', a)))
 );

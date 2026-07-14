@@ -41,7 +41,8 @@ function execute(session, action, params = {}) {
     }
     const id = 'b' + (++seq);
     const extra = Number(params.timeoutMs || params.waitMs || 0);
-    const timeoutMs = extra + (['screenshot', 'snapshot', 'open_tab', 'navigate'].includes(action) ? 45000 : 20000);
+    const slow = ['screenshot', 'snapshot', 'open_tab', 'navigate', 'upload', 'submit'];
+    const timeoutMs = extra + (slow.includes(action) ? 45000 : 20000);
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`命令超时(${timeoutMs}ms): ${action}`));
@@ -77,7 +78,8 @@ function endSession(s) {
 }
 
 // ---------- WebSocket ----------
-const wss = new WebSocketServer({ noServer: true });
+// maxPayload 要装得下 upload 的 base64 文件字节(30MB 文件 → 约 40MB base64)
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
 
 function onExtension(ws) {
   if (extWs && extWs !== ws) { try { extWs.close(); } catch {} }

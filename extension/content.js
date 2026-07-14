@@ -76,9 +76,16 @@
       if (href && !href.startsWith('javascript:')) line += ` href=${href.slice(0, 120)}`;
     }
     if (tag === 'input' || tag === 'textarea') {
-      const v = el.type === 'password' ? '•••' : String(el.value ?? '').slice(0, 100);
-      line += ` value="${v}"`;
-      if (el.type === 'checkbox' || el.type === 'radio') line += el.checked ? ' ✓checked' : '';
+      const type = (el.type || '').toLowerCase();
+      if (type === 'file') {
+        line += ` name=${el.name || '?'}${el.multiple ? ' [可多选]' : ''}`;
+        if (!isVisible(el)) line += ' [视觉隐藏,但可用 upload_file 直接投喂]';
+      } else {
+        const v = type === 'password' ? '•••' : String(el.value ?? '').slice(0, 100);
+        line += ` value="${v}"`;
+        if (type === 'checkbox' || type === 'radio') line += el.checked ? ' ✓checked' : '';
+        if (type === 'hidden') line += ` name=${el.name || '?'} [hidden]`;
+      }
     }
     if (tag === 'select') {
       line += ` selected="${el.selectedOptions?.[0]?.label || ''}" options=${el.options.length}`;
@@ -87,10 +94,23 @@
     return line;
   }
 
-  ops.snapshot = ({ maxChars = 20000 }) => {
+  // 表单字段即使不可见也要收进快照:
+  //  - input[type=hidden] 装着 nonce/CSRF token,agent 看不到就会误判"站点在拦自动化"
+  //  - input[type=file] 几乎总是被 CSS 藏起来(配一个好看的 label),藏了照样能投喂文件
+  function isFormField(el) {
+    if (el.tagName.toLowerCase() !== 'input') return false;
+    const t = (el.type || '').toLowerCase();
+    return t === 'hidden' || t === 'file';
+  }
+
+  ops.snapshot = ({ maxChars = 30000, selector }) => {
     uidSeq = 0;
     els.clear();
-    const lines = [`url: ${location.href}`, `title: ${document.title}`, ''];
+    const root = selector ? document.querySelector(selector) : document.body;
+    if (!root) throw new Error(`选择器无匹配: ${selector}`);
+    const lines = [`url: ${location.href}`, `title: ${document.title}`];
+    if (selector) lines.push(`scope: ${selector}`);
+    lines.push('');
     let budget = maxChars;
     let truncated = false;
 
@@ -114,8 +134,11 @@
         const el = child;
         const tag = el.tagName.toLowerCase();
         if (SKIP_TAGS.has(tag)) continue;
-        if (el.getAttribute('aria-hidden') === 'true') continue;
-        if (!isVisible(el)) continue;
+        if (el.getAttribute('aria-hidden') === 'true' && !isFormField(el)) continue;
+        if (!isVisible(el)) {
+          if (isFormField(el)) push(depth, descr(el));
+          continue;
+        }
 
         if (tag === 'iframe' || tag === 'frame') {
           let idoc = null;
@@ -146,8 +169,14 @@
       }
     };
 
-    if (document.body) walk(document.body, 0);
-    if (truncated) lines.push(`\n…(超过 ${maxChars} 字符已截断 — 用 extract 读完整内容,或调大 maxChars)`);
+    walk(root, 0);
+    if (truncated) {
+      lines.push(
+        `\n⚠️ 快照在 ${maxChars} 字符处被截断,后面的元素全部没抓到 —— 你要找的表单/按钮很可能就在被砍掉的部分里,` +
+        `不要据此判断"页面没有该元素"或"站点在拦截自动化"。` +
+        `\n   改法:传 selector 只抓目标区域(如 selector:"#col-left"、"form#addtag"、"#wpbody-content"),或调大 maxChars。`
+      );
+    }
     return { text: lines.join('\n'), elements: uidSeq, truncated };
   };
 
@@ -260,7 +289,7 @@
     target.dispatchEvent(new KeyboardEvent('keydown', init));
     if (k.length === 1) target.dispatchEvent(new KeyboardEvent('keypress', init));
     target.dispatchEvent(new KeyboardEvent('keyup', init));
-    return { pressed: key, note: k === 'Enter' ? '合成 Enter 不触发浏览器默认提交;需要提交表单时用 realEvents:true' : undefined };
+    return { pressed: key, note: k === 'Enter' ? '合成 Enter 不触发浏览器默认提交;要提交表单请用 browser_submit_form' : undefined };
   };
 
   ops.scroll = ({ uid, to, by }) => {
@@ -305,23 +334,119 @@
       check();
     });
 
-  // ---------- CDP 辅助 ----------
-  ops.rect = ({ uid }) => {
+  // ---------- 表单提交 ----------
+  // el.click() 对多数提交按钮就够了,但按钮被 JS 拦截/不在视口/是 <a> 伪按钮时会静默失效。
+  // requestSubmit 走浏览器原生提交:自动带上所有字段(含 hidden 的 nonce),并触发 HTML 校验和 submit 事件。
+  ops.submit = ({ uid }) => {
     const el = getEl(uid);
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    const r = el.getBoundingClientRect();
-    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width), h: Math.round(r.height) };
+    const tag = el.tagName.toLowerCase();
+    const form = tag === 'form' ? el : el.closest('form');
+    if (!form) throw new Error('该元素不在任何 <form> 内 — 确认 uid 指向表单里的字段或提交按钮');
+    const isSubmitter =
+      (tag === 'button' && (el.type || 'submit') === 'submit') ||
+      (tag === 'input' && ['submit', 'image'].includes((el.type || '').toLowerCase()));
+    form.requestSubmit(isSubmitter ? el : undefined);
+    return {
+      submitted: true,
+      action: form.action || location.href,
+      method: (form.method || 'get').toUpperCase(),
+      fields: form.elements.length,
+    };
   };
-  ops.focusEl = ({ uid, selectAll }) => {
-    const el = getEl(uid);
-    el.focus();
-    if (selectAll && el.select) el.select();
-    return { focused: true };
+
+  // ---------- 文件上传 ----------
+  // 不碰系统文件对话框:直接把字节做成 File 塞进 input.files。
+  // 字节由本地桥读盘后经 WS 送来(页面/扩展都读不了本地磁盘)。
+  function toFile(f) {
+    const bin = atob(f.b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new File([arr], f.name, { type: f.type || 'application/octet-stream', lastModified: Date.now() });
+  }
+
+  function findFileInput(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input' && (el.type || '').toLowerCase() === 'file') return el;
+    if (tag === 'label') {
+      const forId = el.getAttribute('for');
+      const t = forId ? document.getElementById(forId) : el.querySelector('input[type=file]');
+      if (t && (t.type || '').toLowerCase() === 'file') return t;
+    }
+    return el.querySelector?.('input[type=file]') || null;
+  }
+
+  ops.upload = ({ uid, selector, files }) => {
+    const el = uid ? getEl(uid) : document.querySelector(selector);
+    if (!el) throw new Error(`找不到上传目标: ${selector || uid}`);
+
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(toFile(f));
+    const names = [...dt.files].map((f) => f.name);
+
+    const input = findFileInput(el);
+    if (input) {
+      input.files = dt.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return { uploaded: names, via: 'file input', name: input.name || null };
+    }
+
+    // 没有 file input → 当拖拽上传区处理(Dropzone / WP 媒体库拖放区等)
+    const init = { bubbles: true, cancelable: true, composed: true, dataTransfer: dt };
+    for (const t of ['dragenter', 'dragover', 'drop']) el.dispatchEvent(new DragEvent(t, init));
+    return { uploaded: names, via: 'drop 事件', note: '目标不是 file input,已按拖拽区处理;若无反应说明该区域用了别的上传机制' };
   };
-  ops.fireChange = ({ uid }) => {
-    const el = getEl(uid);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return {};
+
+  // ---------- console(由 MAIN world 的 console-hook.js 收集) ----------
+  ops.console = ({ limit = 50 }) =>
+    new Promise((resolve) => {
+      const onMsg = (ev) => {
+        if (ev.source !== window || !ev.data || ev.data.__atbConsoleRes !== true) return;
+        window.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve({ messages: ev.data.entries });
+      };
+      window.addEventListener('message', onMsg);
+      const timer = setTimeout(() => {
+        window.removeEventListener('message', onMsg);
+        resolve({ messages: [], note: 'console 钩子未安装 — 这个标签在钩子注入前就打开了,刷新页面后即可捕获' });
+      }, 1500);
+      window.postMessage({ __atbConsoleReq: true, limit }, '*');
+    });
+
+  // ---------- 整页截图辅助 ----------
+  let hiddenFixed = [];
+
+  ops.pageMetrics = () => {
+    const d = document.documentElement;
+    document.documentElement.style.scrollBehavior = 'auto'; // 平滑滚动会让分片截糊
+    return {
+      width: Math.max(d.scrollWidth, document.body?.scrollWidth || 0),
+      height: Math.max(d.scrollHeight, document.body?.scrollHeight || 0),
+      viewW: window.innerWidth,
+      viewH: window.innerHeight,
+      dpr: window.devicePixelRatio || 1,
+      scrollY: Math.round(window.scrollY),
+    };
+  };
+
+  // 固定/粘性元素(导航条、悬浮客服)会在每一片里重复出现。第一片拍完就藏起来。
+  ops.hideFixed = () => {
+    hiddenFixed = [];
+    for (const el of document.body.querySelectorAll('*')) {
+      const pos = getComputedStyle(el).position;
+      if (pos !== 'fixed' && pos !== 'sticky') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      hiddenFixed.push([el, el.style.visibility]);
+      el.style.visibility = 'hidden';
+    }
+    return { hidden: hiddenFixed.length };
+  };
+
+  ops.restoreFixed = () => {
+    for (const [el, prev] of hiddenFixed) el.style.visibility = prev;
+    hiddenFixed = [];
+    return { restored: true };
   };
 })();
